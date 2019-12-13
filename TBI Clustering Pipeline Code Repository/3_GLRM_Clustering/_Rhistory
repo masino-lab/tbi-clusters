@@ -1,0 +1,512 @@
+cobrit_merged[rowSums(is.na(Hep_test_cols)) < 2, 'Hepatic.blood.test.completed'] = 1
+# 3.	Arterial blood test
+arterial_test_cols = cobrit_merged[, colnames(cobrit_merged) %in% c("PaO2Measr", "PulmBloodGasPPCO2", "PulmGasExFIO2Val" ,"Arterial.pH")]
+cobrit_merged[rowSums(is.na(arterial_test_cols)) == 4, 'Arterial.blood.test.completed'] = 0
+cobrit_merged[rowSums(is.na(arterial_test_cols)) < 4, 'Arterial.blood.test.completed'] = 1
+# 4.	Toxicology Screen (already an indicator variable fore this)
+# Replace NA's with zeros (NA's in this case signify the toxicology screen was not completed)
+cobrit_merged$Toxicology.ToxicologyScreenCompltdLoc[is.na(cobrit_merged$Toxicology.ToxicologyScreenCompltdLoc)] = 0
+# 5. Alcohol Screen (already an indicator variable fore this)
+# Replace NA's with zeros (NA's in this case signify the toxicology screen was not completed)
+cobrit_merged$Alcohol.ToxicologyScreenCompltdLoc[is.na(cobrit_merged$Alcohol.ToxicologyScreenCompltdLoc)] = 0
+# remove the variables which now have indicator variables
+rm_vars = c('X..Neutrophil.....LabTestResltVal', 'Absolute.neutrophil.count..ANC....1000.microliter.LabTestResltVal',
+'X..Lymphocytes.....LabTestResltVal', 'Absolute.lymphocyte.count..ALC....1000.microliter.LabTestResltVal',
+'AST..SGOT....IU.L.LabTestResltVal', 'ALT..SGPT....IU.L.LabTestResltVal',
+"PaO2Measr", "PulmBloodGasPPCO2", "PulmGasExFIO2Val" ,"Arterial.pH", "Alcohol.AlchBldLvlMeasr")
+cobrit_merged = cobrit_merged[,!colnames(cobrit_merged) %in% rm_vars]
+#### Exclude Variables with >30% Missing Data ####
+# remove variables with >30% data (MNAR)
+cobrit_merged_2 = cobrit_merged[, !colnames(cobrit_merged) %in% grtr30_missing_cols]
+# variables with 10-30% missing data
+grtr10less30_cols = colnames(cobrit_merged_2)[(colSums(is.na(cobrit_merged_2)) > .10*dim(cobrit_merged_2)[1] & colSums(is.na(cobrit_merged_2)) < .30*dim(cobrit_merged_2)[1])]
+# These columns are MAR,but imputation with zeros is appropriate in this case (e.g., a lesion volume measurement of zero when no lesion is present)
+cobrit_merged_2$Baseline.CT.CTSbdrlLesnVolMeasr[is.na(cobrit_merged_2$Baseline.CT.CTSbdrlLesnVolMeasr)] = 0
+cobrit_merged_2$Baseline.CT.CTEpdurlLesnVolMeasr[is.na(cobrit_merged_2$Baseline.CT.CTEpdurlLesnVolMeasr)] = 0
+# convert binary variables to factory datatype
+cols = colnames(cobrit_merged_2)[sapply(sapply(cobrit_merged_2, unique), length) <= 3]
+cobrit_merged_2[,cols] = data.frame(apply(cobrit_merged_2[,cols], 2, as.factor))
+imputed_cobrit_rf = missForest(cobrit_merged_2)$ximp
+library(missForest)
+imputed_cobrit_rf = missForest(cobrit_merged_2)$ximp
+View(imputed_cobrit_rf)
+data1 = imputed_cobrit_rf
+factor_col_ind = which(colnames(data1) %in% colnames(data1[,sapply(data1, is.factor)==TRUE]))
+loss_order = rep('Quadratic', dim(data1)[2])
+loss_order[factor_col_ind] = 'Hinge'
+results1 = glrm_cluster_wrapper(data1, gamma_range = c(500:550), krange = c(3:6), loss_order= loss_order)
+sapply(imputed_cobrit_rf, class)
+folds = createFolds(1:nrow(data), k = 5)
+data = data1
+colnames(data) = tolower(gsub("[[:punct:][:blank:]]", "", colnames(data)))
+data = data1
+colnames(data) = tolower(gsub("[[:punct:]], "", colnames(data)))
+# GLRM (Using H2o library)
+h2o.init(nthreads = -1, max_mem_size = "2G", enable_assertions = F)
+folds = createFolds(1:nrow(data), k = 5)
+labels_list = list(fold1=NA, fold2=NA, fold3=NA, fold4=NA, fold5=NA)
+cols_list = list(fold1=NA, fold2=NA, fold3=NA, fold4=NA, fold5=NA)
+bestGammas = list(fold1=NA, fold2=NA, fold3=NA, fold4=NA, fold5=NA)
+bestK_list_training = list(fold1=NA, fold2=NA, fold3=NA, fold4=NA, fold5=NA)
+maxSW_train = list(fold1=NA, fold2=NA, fold3=NA, fold4=NA, fold5=NA)
+labels_list_test = list(fold1=NA, fold2=NA, fold3=NA, fold4=NA, fold5=NA)
+test_maxSW = list(fold1=NA, fold2=NA, fold3=NA, fold4=NA, fold5=NA)
+test_maxK = list(fold1=NA, fold2=NA, fold3=NA, fold4=NA, fold5=NA)
+count = 0
+for(fold in folds){
+count = count + 1
+print(count)
+test = data[fold,]
+train = data[-fold, ]
+gammaRange = gamma_range
+gammaList = c()
+bestKList = c()
+maxSWList = c()
+for(gamma in gammaRange){
+print(gamma)
+gammaList = c(gammaList, gamma)
+# Run model with training data
+#loss_order = c("Quadratic",rep("Hinge", 3),rep("Quadratic", 3),rep("Hinge",22),rep("Quadratic",18),rep("Hinge",10),rep("Quadratic",2),rep("Hinge",2),"Quadratic",rep("Hinge",47))
+glrm.mod = h2o.glrm(training_frame = as.h2o(train) ,transform="STANDARDIZE", k=2, loss_by_col = loss_order,
+regularization_x = "L1", regularization_y = "L1", gamma_x = 0, gamma_y = gamma,
+init="SVD", svd_method="GramSVD", seed=-1)
+# Select columns with non-zero weights
+nonzero_cols = colnames(glrm.mod@model$archetypes)[colSums(glrm.mod@model$archetypes) != 0]
+if(length(nonzero_cols) == 0){
+break
+}else{
+# Subset test dataframe with selected features
+subset = select(train, nonzero_cols)
+}
+# Make distance matrix
+asymms = c()
+for(col in 1:dim(subset)[2]){
+if(length(unique(subset[,col])) == 2){
+# Change boolean variable data type to factor
+subset[,col] = ifelse(subset[,col]=="1", TRUE, FALSE)
+asymms = c(asymms, col)
+}
+}
+if(length(asymms) > 0) {
+gower_dist_matrix  <- as.matrix(daisy(subset, metric = "gower", warnBin = FALSE, type = list(asymm=(asymms))))
+} else {
+gower_dist_matrix  <- as.matrix(daisy(subset, metric = "gower", warnBin = FALSE))
+}
+# Find cluster number with highest silhouette width
+krange = krange
+sil_width = c()
+for(k in krange){
+pam_fit = pam(gower_dist_matrix, diss = TRUE, k = k)
+sil_width = c(sil_width, pam_fit$silinfo$avg.width)
+}
+maxK = krange[which.max(sil_width)]
+max_sil_width = max(sil_width)
+bestKList = c(bestKList, maxK)
+maxSWList = c(maxSWList, max_sil_width)
+}
+# To find features where K !=2
+best_gamma = gammaList[which.max(maxSWList[which(bestKList!=2)])]
+best_K = bestKList[which.max(maxSWList[which(bestKList!=2)])]
+maxSW_train[[count]] = max(maxSWList)
+glrm.mod = h2o.glrm(training_frame = as.h2o(train) ,transform="STANDARDIZE", k=2, loss_by_col = loss_order,
+regularization_x = "L1", regularization_y = "L1", gamma_x = 0, gamma_y = best_gamma,
+init="SVD", svd_method="GramSVD", seed=123)
+nonzero_cols = colnames(glrm.mod@model$archetypes)[colSums(glrm.mod@model$archetypes) != 0]
+train_subset = select(train, nonzero_cols)
+test_subset = select(test, nonzero_cols)
+gower_dist_matrix_train  <- as.matrix(daisy(train_subset, metric = "gower", warnBin = FALSE))
+pam_fit_train = pam(gower_dist_matrix_train, diss = TRUE, k=best_K)
+gower_dist_matrix_test  <- as.matrix(daisy(test_subset, metric = "gower", warnBin = FALSE))
+pam_fit_test = pam(gower_dist_matrix_test, diss = TRUE, k=best_K)
+test_maxK[[count]] = maxK
+test_maxSW[[count]] = max_sil_width
+labels_list[[count]] = factor(pam_fit_train$clustering)
+labels_list_test[[count]] = factor(pam_fit_test$clustering)
+cols_list[[count]] =  nonzero_cols
+bestGammas[[count]] = best_gamma
+bestK_list_training[[count]] = best_K
+}
+return(c(labels_list, cols_list,bestGammas, test_maxK, test_maxSW, labels_list_test, bestK_list_training, maxSW_train))
+}
+data = data1
+colnames(data) = tolower(gsub("[[:punct:]]", "", colnames(data)))
+h2o.init(nthreads = -1, max_mem_size = "2G", enable_assertions = F)
+folds = createFolds(1:nrow(data), k = 5)
+fold = folds[[1]]
+test = data[fold,]
+train = data[-fold, ]
+glrm.mod = h2o.glrm(training_frame = as.h2o(train) ,transform="STANDARDIZE", k=2, loss_by_col = loss_order,
+regularization_x = "L1", regularization_y = "L1", gamma_x = 0, gamma_y = 506,
+init="SVD", svd_method="GramSVD", seed=-1)
+nonzero_cols = colnames(glrm.mod@model$archetypes)[colSums(glrm.mod@model$archetypes) != 0]
+nonzero_cols
+glrm.mod = h2o.glrm(training_frame = as.h2o(train) ,transform="STANDARDIZE", k=2, loss_by_col = loss_order,
+regularization_x = "L1", regularization_y = "L1", gamma_x = 0, gamma_y = 506,
+init="SVD", svd_method="GramSVD")
+nonzero_cols = colnames(glrm.mod@model$archetypes)[colSums(glrm.mod@model$archetypes) != 0]
+nonzero_cols
+load("cobrit_DataClean2.RData")
+load("/Users/kaitfolweiler/Documents/CHOP/TBI Clustering Pipeline Code Repository/1_Data_Cleaning/Old Files/cobrit_DataClean2.RData")
+rm(list=ls())
+load("/Users/kaitfolweiler/Documents/CHOP/TBI Clustering Pipeline Code Repository/1_Data_Cleaning/Old Files/cobrit_DataClean2.RData")
+load("/Users/kaitfolweiler/mf_420.RData")
+load("/Users/kaitfolweiler/Documents/CHOP/FITBIR/COBRIT/COBRIT_Baseline /COBRIT Baseline Data/imputated_mf_data.RData")
+sapply(imputated_mf_data, class)
+data = imputated_mf_data
+cols = colnames(data)
+cols = gsub("[[:punct:]]", "", cols)
+cols = tolower(cols)
+colnames(data) = cols
+set.seed(123)
+h2o.init(nthreads = -1, max_mem_size = "2G", enable_assertions = F)
+set.seed(123)
+folds = createFolds(1:nrow(data), k = 5)
+labels_list = list(fold1=NA, fold2=NA, fold3=NA, fold4=NA, fold5=NA)
+cols_list = list(fold1=NA, fold2=NA, fold3=NA, fold4=NA, fold5=NA)
+bestGammas = list(fold1=NA, fold2=NA, fold3=NA, fold4=NA, fold5=NA)
+count = 0
+for(fold in folds){
+count = count + 1
+print(count)
+test = data[fold,]
+train = data[-fold, ]
+gammaRange = c(400:550)
+gammaList = c()
+bestKList = c()
+maxSWList = c()
+losses = c("Quadratic", rep("Hinge", 25), rep("Quadratic", 18), rep("Hinge", 2), rep("Quadratic", 1), rep("Hinge", 40))
+for(gamma in gammaRange){
+print(gamma)
+gammaList = c(gammaList, gamma)
+# Run model with training data
+glrm.mod = h2o.glrm(training_frame = as.h2o(train) ,transform="STANDARDIZE", k=2, loss_by_col = losses,
+regularization_x = "L1", regularization_y = "L1", gamma_x = 0, gamma_y = gamma,
+init="SVD", svd_method="GramSVD")
+# Select columns with non-zero weights
+nonzero_cols = colnames(glrm.mod@model$archetypes)[colSums(glrm.mod@model$archetypes) != 0]
+if(length(nonzero_cols) == 0){
+break
+}else{
+# Subset test dataframe with selected features
+subset = train[,nonzero_cols]
+}
+# Make distance matrix
+asymms = c()
+for(col in 1:dim(subset)[2]){
+if(length(unique(subset[,col])) == 2){
+# Change boolean variable data type to factor
+subset[,col] = ifelse(subset[,col]=="1", TRUE, FALSE)
+asymms = c(asymms, col)
+}
+}
+if(length(asymms) > 0) {
+gower_dist_matrix  <- as.matrix(daisy(subset, metric = "gower", warnBin = FALSE, type = list(asymm=(asymms))))
+} else {
+gower_dist_matrix  <- as.matrix(daisy(subset, metric = "gower", warnBin = FALSE))
+}
+# Find cluster number with highest silhouette width
+krange = c(2:6)
+sil_width = c()
+for(k in krange){
+pam_fit = pam(gower_dist_matrix, diss = TRUE, k = k)
+sil_width = c(sil_width, pam_fit$silinfo$avg.width)
+}
+maxK = krange[which.max(sil_width)]
+max_sil_width = max(sil_width)
+bestKList = c(bestKList, maxK)
+maxSWList = c(maxSWList, max_sil_width)
+}
+# To find features where K !=2
+best_gamma = gammaList[which.max(maxSWList[which(bestKList!=2)])]
+best_K = bestKList[which.max(maxSWList[which(bestKList!=2)])]
+# The original way
+# best_gamma = gammaList[which.max(maxSWList)]
+# best_K = bestKList[which.max(maxSWList)]
+glrm.mod = h2o.glrm(training_frame = as.h2o(train) ,transform="STANDARDIZE", k=2, loss_by_col = losses,
+regularization_x = "L1", regularization_y = "L1", gamma_x = 0, gamma_y = best_gamma,
+init="SVD", svd_method="GramSVD")
+nonzero_cols = colnames(glrm.mod@model$archetypes)[colSums(glrm.mod@model$archetypes) != 0]
+test_subset = test[,nonzero_cols]
+gower_dist_matrix  <- as.matrix(daisy(test_subset, metric = "gower", warnBin = FALSE))
+pam_fit = pam(gower_dist_matrix, diss = TRUE, k=best_K)
+labels_list[[count]] = factor(pam_fit$clustering)
+cols_list[[count]] =  nonzero_cols
+bestGammas[[count]] = best_gamma
+}
+data1 = imputated_mf_data
+factor_col_ind = which(colnames(data1) %in% colnames(data1[,sapply(data1, is.factor)==TRUE]))
+loss_order = rep('Quadratic', dim(data1)[2])
+loss_order[factor_col_ind] = 'Hinge'
+results1 = glrm_cluster_wrapper(data1, gamma_range = c(500:550), krange = c(3:6), loss_order= loss_order)
+source('glrm_cluster_wrapper.R')
+# Import dependencies
+library(h2o)
+library(Rtsne)
+library(cluster)
+library(caret)
+library(dplyr)
+library(mice)
+path = "~/Documents/CHOP/TBI Clustering Pipeline Code Repository/3_GLRM_Clustering"
+setwd(path)
+source('glrm_cluster_wrapper.R')
+load('~/Documents/CHOP/TBI Clustering Pipeline Code Repository/2_Data_Imputation/20191021_imputeddata.RData')
+data1 = imputated_mf_data
+factor_col_ind = which(colnames(data1) %in% colnames(data1[,sapply(data1, is.factor)==TRUE]))
+loss_order = rep('Quadratic', dim(data1)[2])
+loss_order[factor_col_ind] = 'Hinge'
+results1 = glrm_cluster_wrapper(data1, gamma_range = c(500:550), krange = c(3:6), loss_order= loss_order)
+sum(is.na(data1))
+source('~/Documents/CHOP/TBI Clustering Pipeline Code Repository/3_GLRM_Clustering/glrm_cluster_wrapper.R')
+results1 = glrm_cluster_wrapper(data1, gamma_range = c(500:550), krange = c(3:6), loss_order= loss_order)
+glrm.mod = h2o.glrm(training_frame = as.h2o(data1) ,transform="STANDARDIZE", k=2, loss_by_col = loss_order,
+regularization_x = "L1", regularization_y = "L1", gamma_x = 0, gamma_y = 500,
+init="SVD", svd_method="GramSVD", seed=-1)
+nonzero_cols = colnames(glrm.mod@model$archetypes)[colSums(glrm.mod@model$archetypes) != 0]
+glrm.mod = h2o.glrm(training_frame = as.h2o(data1) ,transform="STANDARDIZE", k=2, loss_by_col = loss_order,
+regularization_x = "L1", regularization_y = "L1", gamma_x = 0, gamma_y = 400,
+init="SVD", svd_method="GramSVD", seed=-1)
+nonzero_cols = colnames(glrm.mod@model$archetypes)[colSums(glrm.mod@model$archetypes) != 0]
+nonzero_cols
+folds = createFolds(1:nrow(data), k = 5)
+fold = folds[[1]]
+data = data1
+test = data[fold,]
+train = data[-fold, ]
+glrm.mod = h2o.glrm(training_frame = as.h2o(train) ,transform="STANDARDIZE", k=2, loss_by_col = loss_order,
+regularization_x = "L1", regularization_y = "L1", gamma_x = 0, gamma_y = 400,
+init="SVD", svd_method="GramSVD", seed=-1)
+nonzero_cols = colnames(glrm.mod@model$archetypes)[colSums(glrm.mod@model$archetypes) != 0]
+glrm.mod = h2o.glrm(training_frame = as.h2o(train) ,transform="STANDARDIZE", k=2, loss_by_col = loss_order,
+regularization_x = "L1", regularization_y = "L1", gamma_x = 0, gamma_y = 350,
+init="SVD", svd_method="GramSVD", seed=-1)
+nonzero_cols = colnames(glrm.mod@model$archetypes)[colSums(glrm.mod@model$archetypes) != 0]
+nonzero_cols
+if(length(nonzero_cols) == 0){
+break
+}else{
+# Subset test dataframe with selected features
+subset = select(train, nonzero_cols)
+}
+colnames(data) = tolower(gsub("[[:punct:][:blank:]]", "", colnames(data)))
+test = data[fold,]
+train = data[-fold, ]
+glrm.mod = h2o.glrm(training_frame = as.h2o(train) ,transform="STANDARDIZE", k=2, loss_by_col = loss_order,
+regularization_x = "L1", regularization_y = "L1", gamma_x = 0, gamma_y = 350,
+init="SVD", svd_method="GramSVD", seed=-1)
+nonzero_cols = colnames(glrm.mod@model$archetypes)[colSums(glrm.mod@model$archetypes) != 0]
+if(length(nonzero_cols) == 0){
+break
+}else{
+# Subset test dataframe with selected features
+subset = select(train, nonzero_cols)
+}
+asymms = c()
+for(col in 1:dim(subset)[2]){
+if(length(unique(subset[,col])) == 2){
+# Change boolean variable data type to factor
+subset[,col] = ifelse(subset[,col]=="1", TRUE, FALSE)
+asymms = c(asymms, col)
+}
+}
+if(length(asymms) > 0) {
+gower_dist_matrix  <- as.matrix(daisy(subset, metric = "gower", warnBin = FALSE, type = list(asymm=(asymms))))
+} else {
+gower_dist_matrix  <- as.matrix(daisy(subset, metric = "gower", warnBin = FALSE))
+}
+krange = krange
+sil_width = c()
+pam_fit = pam(gower_dist_matrix, diss = TRUE, k = 3)
+pam_fit$silinfo$avg.width
+data1 = imputated_mf_data
+factor_col_ind = which(colnames(data1) %in% colnames(data1[,sapply(data1, is.factor)==TRUE]))
+loss_order = rep('Quadratic', dim(data1)[2])
+loss_order[factor_col_ind] = 'Hinge'
+results1 = glrm_cluster_wrapper(data1, gamma_range = c(500:550), krange = c(3:6), loss_order= loss_order)
+path = "~/Documents/CHOP/TBI Clustering Pipeline Code Repository/3_GLRM_Clustering"
+setwd(path)
+source('glrm_cluster_wrapper.R')
+data1 = imputated_mf_data
+factor_col_ind = which(colnames(data1) %in% colnames(data1[,sapply(data1, is.factor)==TRUE]))
+loss_order = rep('Quadratic', dim(data1)[2])
+loss_order[factor_col_ind] = 'Hinge'
+results1 = glrm_cluster_wrapper(data1, gamma_range = c(500:550), krange = c(3:6), loss_order= loss_order)
+results1 = glrm_cluster_wrapper(data1, gamma_range = c(350:550), krange = c(3:6), loss_order= loss_order)
+source('~/Documents/CHOP/TBI Clustering Pipeline Code Repository/3_GLRM_Clustering/glrm_cluster_wrapper.R')
+results1 = glrm_cluster_wrapper(data1, gamma_range = c(450:550), krange = c(3:6), loss_order= loss_order)
+results1 = glrm_cluster_wrapper(data1, gamma_range = c(400:550), krange = c(3:6), loss_order= loss_order)
+results1 = glrm_cluster_wrapper(data1, gamma_range = c(360:550), krange = c(3:6), loss_order= loss_order)
+results1 = glrm_cluster_wrapper(data1, gamma_range = c(380:550), krange = c(3:6), loss_order= loss_order)
+results1 = glrm_cluster_wrapper(data1, gamma_range = c(375:550), krange = c(3:6), loss_order= loss_order)
+gamma_range = c(375:550)
+krange=c(3:6)
+data = data1
+colnames(data) = tolower(gsub("[[:punct:][:blank:]]", "", colnames(data)))
+h2o.init(nthreads = -1, max_mem_size = "2G", enable_assertions = F)
+folds = createFolds(1:nrow(data), k = 5)
+labels_list = list(fold1=NA, fold2=NA, fold3=NA, fold4=NA, fold5=NA)
+cols_list = list(fold1=NA, fold2=NA, fold3=NA, fold4=NA, fold5=NA)
+bestGammas = list(fold1=NA, fold2=NA, fold3=NA, fold4=NA, fold5=NA)
+bestK_list_training = list(fold1=NA, fold2=NA, fold3=NA, fold4=NA, fold5=NA)
+maxSW_train = list(fold1=NA, fold2=NA, fold3=NA, fold4=NA, fold5=NA)
+labels_list_test = list(fold1=NA, fold2=NA, fold3=NA, fold4=NA, fold5=NA)
+test_maxSW = list(fold1=NA, fold2=NA, fold3=NA, fold4=NA, fold5=NA)
+test_maxK = list(fold1=NA, fold2=NA, fold3=NA, fold4=NA, fold5=NA)
+count = 0
+for(fold in folds){
+count = count + 1
+print(count)
+test = data[fold,]
+train = data[-fold, ]
+gammaRange = gamma_range
+gammaList = c()
+bestKList = c()
+maxSWList = c()
+for(gamma in gammaRange){
+print(gamma)
+gammaList = c(gammaList, gamma)
+# Run model with training data
+#loss_order = c("Quadratic",rep("Hinge", 3),rep("Quadratic", 3),rep("Hinge",22),rep("Quadratic",18),rep("Hinge",10),rep("Quadratic",2),rep("Hinge",2),"Quadratic",rep("Hinge",47))
+glrm.mod = h2o.glrm(training_frame = as.h2o(train) ,transform="STANDARDIZE", k=2, loss_by_col = loss_order,
+regularization_x = "L1", regularization_y = "L1", gamma_x = 0, gamma_y = gamma,
+init="SVD", svd_method="GramSVD", seed=-1)
+# Select columns with non-zero weights
+nonzero_cols = colnames(glrm.mod@model$archetypes)[colSums(glrm.mod@model$archetypes) != 0]
+if(length(nonzero_cols) == 0){
+break
+}else{
+# Subset test dataframe with selected features
+subset = select(train, nonzero_cols)
+}
+# Make distance matrix
+asymms = c()
+for(col in 1:dim(subset)[2]){
+if(length(unique(subset[,col])) == 2){
+# Change boolean variable data type to factor
+subset[,col] = ifelse(subset[,col]=="1", TRUE, FALSE)
+asymms = c(asymms, col)
+}
+}
+if(length(asymms) > 0) {
+gower_dist_matrix  <- as.matrix(daisy(subset, metric = "gower", warnBin = FALSE, type = list(asymm=(asymms))))
+} else {
+gower_dist_matrix  <- as.matrix(daisy(subset, metric = "gower", warnBin = FALSE))
+}
+# Find cluster number with highest silhouette width
+krange = krange
+sil_width = c()
+for(k in krange){
+pam_fit = pam(gower_dist_matrix, diss = TRUE, k = k)
+sil_width = c(sil_width, pam_fit$silinfo$avg.width)
+}
+maxK = krange[which.max(sil_width)]
+max_sil_width = max(sil_width)
+bestKList = c(bestKList, maxK)
+maxSWList = c(maxSWList, max_sil_width)
+}
+# To find features where K !=2
+best_gamma = gammaList[which.max(maxSWList[which(bestKList!=2)])]
+best_K = bestKList[which.max(maxSWList[which(bestKList!=2)])]
+maxSW_train[[count]] = max(maxSWList)
+glrm.mod = h2o.glrm(training_frame = as.h2o(train) ,transform="STANDARDIZE", k=2, loss_by_col = loss_order,
+regularization_x = "L1", regularization_y = "L1", gamma_x = 0, gamma_y = best_gamma,
+init="SVD", svd_method="GramSVD", seed=123)
+nonzero_cols = colnames(glrm.mod@model$archetypes)[colSums(glrm.mod@model$archetypes) != 0]
+train_subset = select(train, nonzero_cols)
+test_subset = select(test, nonzero_cols)
+gower_dist_matrix_train  <- as.matrix(daisy(train_subset, metric = "gower", warnBin = FALSE))
+pam_fit_train = pam(gower_dist_matrix_train, diss = TRUE, k=best_K)
+gower_dist_matrix_test  <- as.matrix(daisy(test_subset, metric = "gower", warnBin = FALSE))
+pam_fit_test = pam(gower_dist_matrix_test, diss = TRUE, k=best_K)
+test_maxK[[count]] = maxK
+test_maxSW[[count]] = max_sil_width
+labels_list[[count]] = factor(pam_fit_train$clustering)
+labels_list_test[[count]] = factor(pam_fit_test$clustering)
+cols_list[[count]] =  nonzero_cols
+bestGammas[[count]] = best_gamma
+bestK_list_training[[count]] = best_K
+}
+fold
+test = data[fold,]
+train = data[-fold, ]
+gammaRange = gamma_range
+gammaList = c()
+bestKList = c()
+maxSWList = c()
+gamma = 350
+glrm.mod = h2o.glrm(training_frame = as.h2o(train) ,transform="STANDARDIZE", k=2, loss_by_col = loss_order,
+regularization_x = "L1", regularization_y = "L1", gamma_x = 0, gamma_y = gamma,
+init="SVD", svd_method="GramSVD", seed=-1)
+nonzero_cols = colnames(glrm.mod@model$archetypes)[colSums(glrm.mod@model$archetypes) != 0]
+if(length(nonzero_cols) == 0){
+break
+}else{
+# Subset test dataframe with selected features
+subset = select(train, nonzero_cols)
+}
+asymms = c()
+for(col in 1:dim(subset)[2]){
+if(length(unique(subset[,col])) == 2){
+# Change boolean variable data type to factor
+subset[,col] = ifelse(subset[,col]=="1", TRUE, FALSE)
+asymms = c(asymms, col)
+}
+}
+if(length(asymms) > 0) {
+gower_dist_matrix  <- as.matrix(daisy(subset, metric = "gower", warnBin = FALSE, type = list(asymm=(asymms))))
+} else {
+gower_dist_matrix  <- as.matrix(daisy(subset, metric = "gower", warnBin = FALSE))
+}
+gower_dist_matrix
+asymms
+krange = krange
+sil_width = c()
+for(k in krange){
+pam_fit = pam(gower_dist_matrix, diss = TRUE, k = k)
+sil_width = c(sil_width, pam_fit$silinfo$avg.width)
+}
+maxK = krange[which.max(sil_width)]
+max_sil_width = max(sil_width)
+bestKList = c(bestKList, maxK)
+maxSWList = c(maxSWList, max_sil_width)
+for(gamma in gammaRange){
+print(gamma)
+gammaList = c(gammaList, gamma)
+# Run model with training data
+#loss_order = c("Quadratic",rep("Hinge", 3),rep("Quadratic", 3),rep("Hinge",22),rep("Quadratic",18),rep("Hinge",10),rep("Quadratic",2),rep("Hinge",2),"Quadratic",rep("Hinge",47))
+glrm.mod = h2o.glrm(training_frame = as.h2o(train) ,transform="STANDARDIZE", k=2, loss_by_col = loss_order,
+regularization_x = "L1", regularization_y = "L1", gamma_x = 0, gamma_y = gamma,
+init="SVD", svd_method="GramSVD", seed=-1)
+# Select columns with non-zero weights
+nonzero_cols = colnames(glrm.mod@model$archetypes)[colSums(glrm.mod@model$archetypes) != 0]
+if(length(nonzero_cols) == 0){
+break
+}else{
+# Subset test dataframe with selected features
+subset = select(train, nonzero_cols)
+}
+# Make distance matrix
+asymms = c()
+for(col in 1:dim(subset)[2]){
+if(length(unique(subset[,col])) == 2){
+# Change boolean variable data type to factor
+subset[,col] = ifelse(subset[,col]=="1", TRUE, FALSE)
+asymms = c(asymms, col)
+}
+}
+if(length(asymms) > 0) {
+gower_dist_matrix  <- as.matrix(daisy(subset, metric = "gower", warnBin = FALSE, type = list(asymm=(asymms))))
+} else {
+gower_dist_matrix  <- as.matrix(daisy(subset, metric = "gower", warnBin = FALSE))
+}
+# Find cluster number with highest silhouette width
+krange = krange
+sil_width = c()
+for(k in krange){
+pam_fit = pam(gower_dist_matrix, diss = TRUE, k = k)
+sil_width = c(sil_width, pam_fit$silinfo$avg.width)
+}
+maxK = krange[which.max(sil_width)]
+max_sil_width = max(sil_width)
+bestKList = c(bestKList, maxK)
+maxSWList = c(maxSWList, max_sil_width)
+}
